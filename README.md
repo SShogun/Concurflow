@@ -4,6 +4,10 @@ ConcurFlow is a Go concurrency reference project that processes URLs through a c
 
 It is intentionally compact, but it demonstrates patterns that matter in production systems: channel-based pipelines, semaphore-backed backpressure, context propagation, structured logging, and clean separation between validation and I/O.
 
+## Diagram
+
+![ConcurFlow architecture diagram](mermaid-diagram.png)
+
 ## Project Highlights
 
 - URL normalization and validation through a source -> transform -> sink pipeline.

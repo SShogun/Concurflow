@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"time"
 
-	"Concurflow/internal/downloader"
-	"Concurflow/internal/logging"
-	"Concurflow/internal/pipeline"
+	"github.com/SShogun/Concurflow/internal/downloader"
+	"github.com/SShogun/Concurflow/internal/logging"
+	"github.com/SShogun/Concurflow/internal/pipeline"
 )
 
 type App struct {
@@ -23,11 +22,18 @@ func New(cfg Config) *App {
 	}
 }
 
-// Run orchestrates the entire pipeline: normalize URLs, process through pool workers, download with backpressure.
+// Run orchestrates URL normalization and bounded concurrent downloads.
 func (a *App) Run(ctx context.Context) error {
+	if err := a.cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, a.cfg.RunTimeout)
+	defer cancel()
+
 	a.logger.Info("app starting", "config", fmt.Sprintf("%+v", a.cfg))
 
-	// Sample URLs for demo - in real usage these would come from user input or API
+	// Sample URLs for demo - in real usage these would come from user input or API.
 	urls := []string{
 		"https://www.google.com",
 		"https://github.com",
@@ -37,25 +43,20 @@ func (a *App) Run(ctx context.Context) error {
 		"",
 	}
 
-	// Phase 1: Normalize URLs through pipeline
 	a.logger.Info("phase 1: normalizing urls", "component", "app")
-	normCtx, normCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer normCancel()
-
 	rawURLs := make([]pipeline.RawURL, len(urls))
 	for i, u := range urls {
 		rawURLs[i] = pipeline.RawURL{ID: i, URL: u}
 	}
 
-	normalized, err := pipeline.Run(normCtx, a.logger, rawURLs)
+	normalized, err := pipeline.RunBuffered(runCtx, a.logger, rawURLs, a.cfg.PipelineBufferSize)
 	if err != nil {
 		a.logger.Error("pipeline failed", "error", err)
 		return err
 	}
 
-	a.logger.Info("pipeline complete", "input_count", len(rawURLs), "valid_output", len(normalized))
+	a.logger.Info("pipeline complete", "input_count", len(rawURLs), "output_count", len(normalized))
 
-	// Filter out invalid URLs for downloading
 	validURLs := make([]downloader.DownloadRequest, 0, len(normalized))
 	for _, nu := range normalized {
 		if nu.Valid {
@@ -67,20 +68,15 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	a.logger.Info("filtered urls for download", "valid_count", len(validURLs))
-
-	// Phase 2: Download with rate limiting
 	a.logger.Info("phase 2: downloading with rate limit", "component", "app", "max_concurrent", a.cfg.MaxConcurrentDownloads)
-	downloadCtx, dlCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer dlCancel()
 
 	dl := downloader.New(a.cfg, a.logger)
-	results, err := dl.Run(downloadCtx, validURLs)
+	results, err := dl.Run(runCtx, validURLs)
 	if err != nil {
 		a.logger.Error("download phase failed", "error", err)
 		return err
 	}
 
-	// Summarize results
 	a.logger.Info("download phase complete", "total_results", len(results))
 	successful := 0
 	failed := 0

@@ -1,0 +1,14 @@
+# Go build artifacts
+/concurflow
+/concurflow.exe
+*.test
+
+# Coverage and profiling output
+coverage.out
+*.prof
+*.pprof
+
+# Editor and OS metadata
+.DS_Store
+.vscode/
+.idea/

@@ -1,8 +1,8 @@
 package app
 
-// Re-export Config and DefaultConfig for backward compatibility
-import "Concurflow/internal/config"
+import "github.com/SShogun/Concurflow/internal/config"
 
+// Config aliases the central runtime configuration.
 type Config = config.Config
 
 func DefaultConfig() Config {

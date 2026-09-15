@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -49,7 +50,16 @@ func fetch(ctx context.Context, client *http.Client, req DownloadRequest, logger
 	defer resp.Body.Close()
 
 	result.StatusCode = resp.StatusCode
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		result.Err = err
+		result.Duration = time.Since(start)
+		if logger != nil {
+			logger.Error("failed to read response body", "component", "downloader", "url", req.URL, "error", err)
+		}
+		return result
+	}
 	result.Duration = time.Since(start)
+
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		result.Err = fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 		if logger != nil {

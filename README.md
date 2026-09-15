@@ -1,163 +1,151 @@
 # ConcurFlow
 
-ConcurFlow is a Go concurrency reference project that processes URLs through a clear pipeline, rejects invalid inputs early, and downloads valid URLs with bounded parallelism and graceful cancellation.
+[![CI](https://github.com/SShogun/Concurflow/actions/workflows/ci.yml/badge.svg)](https://github.com/SShogun/Concurflow/actions/workflows/ci.yml)
 
-It is intentionally compact, but it demonstrates patterns that matter in production systems: channel-based pipelines, semaphore-backed backpressure, context propagation, structured logging, and clean separation between validation and I/O.
+ConcurFlow is a compact Go concurrency reference project that validates URLs, moves them through a cancellable channel pipeline, and downloads valid URLs with bounded parallelism.
+
+The repository focuses on ownership and lifecycle rules that matter in concurrent services: semaphore ownership, cancellation propagation, channel closure, bounded work, deterministic tests, and explicit configuration validation.
 
 ## Diagram
 
 ![ConcurFlow architecture diagram](mermaid-diagram.png)
 
-## Project Highlights
+## What It Demonstrates
 
-- URL normalization and validation through a source -> transform -> sink pipeline.
-- Controlled HTTP concurrency with per-request timeouts.
-- Graceful shutdown via signal-aware contexts.
-- Structured logging across each stage of execution.
-- Reusable concurrency primitives in the worker pool and event mux packages.
+- source -> transform -> sink channel pipelines;
+- configurable pipeline buffering;
+- semaphore-backed download concurrency limits;
+- parent cancellation plus per-download timeouts;
+- deterministic result ordering despite concurrent execution;
+- fan-in with correct output-channel ownership;
+- worker-pool shutdown that is safe against concurrent submissions;
+- structured logging and explicit validation failures;
+- deterministic concurrency tests using `httptest` and synchronization channels.
 
-## What This Project Demonstrates
+## Main Flow
 
-This repository is useful as a resume project because it shows more than a basic fetcher. It highlights practical engineering decisions around concurrency, safety, and observability:
-
-- Input validation happens before network work begins.
-- Backpressure limits the number of in-flight downloads.
-- Cancellation is propagated through the full execution path.
-- Each major component has a narrow responsibility.
-- Error states are explicit and traceable.
-
-## Architecture
-
-1. The application starts from a signal-aware root context.
-2. Raw URL strings are wrapped into pipeline records.
-3. The source stage emits records into the pipeline.
+1. The command creates a signal-aware root context.
+2. `app.Run` validates configuration and derives the configured overall run timeout.
+3. Raw URL records enter the pipeline.
 4. The transform stage trims, parses, and classifies each URL.
-5. Invalid URLs are marked with reasons such as empty, missing scheme, or unsupported scheme.
-6. Valid URLs are filtered into download requests.
-7. The downloader limits concurrency with a semaphore.
-8. Each request uses its own timeout.
-9. Results are collected and summarized in logs.
+5. Invalid inputs are retained as structured validation results and filtered before network I/O.
+6. The downloader acquires a semaphore permit before starting each request.
+7. Every acquired permit is released by the same goroutine that acquired it.
+8. Each HTTP request receives its own timeout derived from the parent context.
+9. Results are collected in original request order.
+10. Parent cancellation is returned to the caller rather than silently swallowed.
+
+## URL Validation
+
+The pipeline currently reports these reasons:
+
+- `empty`
+- `malformed_url`
+- `missing_scheme`
+- `missing_host`
+- `unsupported_scheme`
+- `fair` for accepted HTTP/HTTPS URLs
+
+A URL is accepted for download only when it parses successfully, uses HTTP or HTTPS, and has a host.
+
+## Concurrency Invariants
+
+### Downloader permit ownership
+
+A goroutine releases a semaphore slot only after successfully acquiring that slot. Cancellation while waiting therefore cannot steal another request's permit or leave an in-flight request blocked during cleanup.
+
+### Mux channel ownership
+
+Input forwarders never close the merged output channel. A single coordinator waits for all forwarders and closes the output exactly once, after all inputs finish or cancellation stops them.
+
+### Worker-pool shutdown
+
+`Shutdown` signals workers before closing the jobs channel, prevents new submissions from racing with channel close, waits for workers, and closes results exactly once. Submissions after shutdown return `pool.ErrClosed`.
 
 ## Package Overview
 
 | Package | Responsibility |
 | --- | --- |
 | `cmd/concurflow` | Program entrypoint and signal-aware shutdown |
-| `internal/app` | Orchestrates pipeline execution, filtering, downloading, and summary |
-| `internal/pipeline` | Source, transform, and sink stages for URL normalization |
-| `internal/downloader` | HTTP fetching with bounded concurrency and timeouts |
-| `internal/pool` | Worker pool for bounded job processing |
-| `internal/mux` | Fan-in utility for merging event channels |
-| `internal/config` | Central configuration defaults |
+| `internal/app` | Configuration validation and top-level orchestration |
+| `internal/pipeline` | URL source, transform, sink, buffering, and validation |
+| `internal/downloader` | HTTP fetching with bounded concurrency and per-request timeouts |
+| `internal/pool` | Bounded worker processing with explicit shutdown lifecycle |
+| `internal/mux` | Fan-in utility with coordinated channel closure |
+| `internal/config` | Central defaults and validation |
 | `internal/logging` | Structured logger setup |
-| `internal/demo` | Testable scenarios that exercise the system |
-
-## Pipeline Behavior
-
-The pipeline is intentionally simple and explicit:
-
-- Source emits raw URL records into a channel.
-- Transform trims input, parses URLs, and classifies invalid values.
-- Sink collects normalized URLs into a final slice.
-
-Validation reasons are encoded in the output so failures are understandable, not just rejected:
-
-- `empty`
-- `missing_scheme`
-- `unsupported_scheme`
-
-## Downloader Behavior
-
-The downloader applies backpressure before it applies network pressure.
-
-- `MaxConcurrentDownloads` sets the number of in-flight requests.
-- `PerDownloadTimeout` bounds each HTTP request.
-- Context cancellation stops work cleanly.
-- Non-2xx responses are returned as structured failures.
-
-This is the main design idea behind ConcurFlow: control the fan-out instead of letting it grow without limits.
-
-## Supporting Components
-
-The repository also includes reusable concurrency building blocks:
-
-- `pool` provides bounded job processing with a worker pool.
-- `mux` merges multiple event streams into one output channel.
-
-These packages are useful on their own, even though the main demo focuses on URL validation and downloading.
+| `internal/demo` | Interactive/example scenarios |
 
 ## Configuration Defaults
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `WorkerCount` | `5` | Number of worker goroutines in the pool |
-| `QueueDepth` | `100` | Buffered queue depth for submitted jobs |
-| `PipelineBufferSize` | `10` | Buffer depth for pipeline stages |
-| `MaxConcurrentDownloads` | `3` | Maximum concurrent HTTP requests |
-| `PerDownloadTimeout` | `10s` | Timeout for each individual download |
-| `RunTimeout` | `1m` | Overall operation timeout |
+| `WorkerCount` | `5` | Worker goroutines in the reusable pool |
+| `QueueDepth` | `100` | Buffered worker-pool job queue |
+| `PipelineBufferSize` | `10` | Buffer size used by the application's pipeline stages |
+| `MaxConcurrentDownloads` | `3` | Maximum in-flight HTTP requests |
+| `PerDownloadTimeout` | `10s` | Timeout for each individual request |
+| `RunTimeout` | `1m` | Overall application run timeout |
 
-## Requirements
+Invalid concurrency counts, negative buffer/queue sizes, and non-positive timeouts fail validation instead of creating deadlocks or invalid channels.
 
-- Go 1.25 or newer
-- Standard library only
+## Build and Run
 
-## Quick Start
-
-### Build
+Requirements: Go 1.25 or newer. Runtime code uses the standard library only.
 
 ```bash
 go build ./cmd/concurflow
-```
-
-### Run
-
-```bash
 go run ./cmd/concurflow
 ```
 
-### Test
+The command uses a small public-URL demo workload. Deterministic automated tests do **not** depend on public internet services.
+
+## Verification
+
+Run the same core checks enforced by CI:
 
 ```bash
+gofmt -w .
+go vet ./...
 go test ./...
+go test -race ./...
 ```
 
-The default run processes a sample mix of valid and invalid URLs so you can see validation, filtering, rate limiting, and cancellation behavior in one place.
+The regression suite specifically covers:
 
-## Demo Scenarios
+- cancellation while requests are waiting for a semaphore permit;
+- bounded maximum download concurrency;
+- per-download timeout behavior;
+- stable result ordering;
+- mux forwarding and closure;
+- mux cancellation;
+- worker-pool shutdown without a result consumer;
+- submission racing worker-pool shutdown;
+- submission after worker-pool shutdown;
+- URL validation categories;
+- configuration validation.
 
-The demo package contains scenarios that are useful for walkthroughs and testing:
+## Benchmark / Profiling Note
 
-- Basic flow
-- Cancellation handling
-- Backpressure and rate limiting
-- Invalid URL handling
-- Mixed valid and invalid traffic
+The pipeline package includes a focused URL-normalization benchmark:
 
-## Error Handling
+```bash
+go test ./internal/pipeline -run '^$' -bench BenchmarkNormalizeValidURL -benchmem
+```
 
-ConcurFlow handles failures explicitly instead of hiding them:
+For a CPU profile:
 
-- Empty URLs are rejected during transformation.
-- URLs without a supported scheme are flagged before download.
-- Download timeouts are enforced per request.
-- Non-2xx HTTP responses are returned as structured errors.
-- Context cancellation is respected across all stages.
+```bash
+go test ./internal/pipeline -run '^$' -bench BenchmarkNormalizeValidURL -cpuprofile cpu.prof
+go tool pprof cpu.prof
+```
 
-## Resume Value
+No throughput or latency numbers are claimed in this README because benchmark numbers are only meaningful with the hardware, Go version, workload, and run conditions recorded alongside them. The downloader is intentionally network-bound; its important local property is the enforced maximum number of concurrent requests.
 
-This project is a strong resume piece because it shows practical system design, not just syntax. It demonstrates an understanding of concurrency control, cancellation, observability, and modular Go code structure.
+## Current Scope
 
-## Limitations
-
-This repository is intentionally scoped as a reference implementation. It does not include:
-
-- Persistent storage
-- Retry logic
-- Authentication
-- Distributed processing
-- Advanced crawling beyond scheme validation
+ConcurFlow is deliberately small. It does not implement persistence, retries, authentication, distributed coordination, or advanced crawling. The downloader launches one goroutine per requested URL while bounding **network concurrency** with a semaphore, so this is a concurrency-reference implementation rather than an unbounded-scale crawler.
 
 ## License
 
-Educational example. Use freely.
+No license file is currently included.

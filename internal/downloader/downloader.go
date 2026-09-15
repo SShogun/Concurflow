@@ -1,11 +1,13 @@
 package downloader
 
 import (
-	"Concurflow/internal/config"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
+
+	"github.com/SShogun/Concurflow/internal/config"
 )
 
 type Downloader struct {
@@ -14,7 +16,16 @@ type Downloader struct {
 	client *http.Client
 }
 
+type indexedResult struct {
+	index  int
+	result DownloadResult
+}
+
 func New(cfg config.Config, logger *slog.Logger) *Downloader {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	return &Downloader{
 		cfg:    cfg,
 		logger: logger,
@@ -23,6 +34,12 @@ func New(cfg config.Config, logger *slog.Logger) *Downloader {
 }
 
 func (d *Downloader) Run(ctx context.Context, reqs []DownloadRequest) ([]DownloadResult, error) {
+	if d.cfg.MaxConcurrentDownloads <= 0 {
+		return nil, fmt.Errorf("max concurrent downloads must be greater than zero")
+	}
+	if d.cfg.PerDownloadTimeout <= 0 {
+		return nil, fmt.Errorf("per-download timeout must be greater than zero")
+	}
 	if len(reqs) == 0 {
 		d.logger.Info("downloader received empty request list", "component", "downloader")
 		return []DownloadResult{}, nil
@@ -31,38 +48,41 @@ func (d *Downloader) Run(ctx context.Context, reqs []DownloadRequest) ([]Downloa
 	d.logger.Info("downloader starting", "component", "downloader", "request_count", len(reqs), "max_concurrent", d.cfg.MaxConcurrentDownloads)
 
 	semaphore := make(chan struct{}, d.cfg.MaxConcurrentDownloads)
-	internalResults := make(chan DownloadResult, len(reqs))
+	internalResults := make(chan indexedResult, len(reqs))
 	var wg sync.WaitGroup
-	var results []DownloadResult
-	var resultsMutex sync.Mutex
 
 	for i, req := range reqs {
 		wg.Add(1)
 
 		go func(idx int, request DownloadRequest) {
 			defer wg.Done()
-			defer func() {
-				<-semaphore
-			}()
 
 			select {
 			case <-ctx.Done():
 				d.logger.Info("downloader request canceled before permit acquired", "component", "downloader", "request_id", request.ID, "url", request.URL, "reason", "context_done")
-				internalResults <- DownloadResult{
-					ID:       request.ID,
-					URL:      request.URL,
-					Err:      ctx.Err(),
-					Duration: 0,
+				internalResults <- indexedResult{
+					index: idx,
+					result: DownloadResult{
+						ID:       request.ID,
+						URL:      request.URL,
+						Err:      ctx.Err(),
+						Duration: 0,
+					},
 				}
 				return
 			case semaphore <- struct{}{}:
 			}
 
+			// A goroutine may release a semaphore slot only after it has acquired one.
+			defer func() {
+				<-semaphore
+			}()
+
 			itemCtx, cancel := context.WithTimeout(ctx, d.cfg.PerDownloadTimeout)
 			defer cancel()
 
 			result := fetch(itemCtx, d.client, request, d.logger)
-			internalResults <- result
+			internalResults <- indexedResult{index: idx, result: result}
 
 			d.logger.Info("downloader request completed", "component", "downloader", "request_id", request.ID, "url", request.URL, "status_code", result.StatusCode, "has_error", result.Err != nil)
 		}(i, req)
@@ -73,12 +93,14 @@ func (d *Downloader) Run(ctx context.Context, reqs []DownloadRequest) ([]Downloa
 		close(internalResults)
 	}()
 
-	for result := range internalResults {
-		resultsMutex.Lock()
-		results = append(results, result)
-		resultsMutex.Unlock()
+	results := make([]DownloadResult, len(reqs))
+	for item := range internalResults {
+		results[item.index] = item.result
 	}
 
 	d.logger.Info("downloader finished", "component", "downloader", "result_count", len(results))
+	if err := ctx.Err(); err != nil {
+		return results, err
+	}
 	return results, nil
 }

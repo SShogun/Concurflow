@@ -2,16 +2,17 @@ package demo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
-	"Concurflow/internal/app"
-	"Concurflow/internal/downloader"
-	"Concurflow/internal/logging"
-	"Concurflow/internal/pipeline"
+	"github.com/SShogun/Concurflow/internal/app"
+	"github.com/SShogun/Concurflow/internal/downloader"
+	"github.com/SShogun/Concurflow/internal/logging"
+	"github.com/SShogun/Concurflow/internal/pipeline"
 )
 
-// ScenarioBasic runs a simple URL normalization and download flow
+// ScenarioBasic runs a simple URL normalization and download flow.
 func ScenarioBasic(ctx context.Context) error {
 	logger := logging.New()
 	logger.Info("=== SCENARIO: Basic Flow ===")
@@ -22,7 +23,7 @@ func ScenarioBasic(ctx context.Context) error {
 	return a.Run(ctx)
 }
 
-// ScenarioCancellation tests that cancellation properly stops all subsystems
+// ScenarioCancellation verifies that cancellation stops downloader work cleanly.
 func ScenarioCancellation(ctx context.Context) error {
 	logger := logging.New()
 	logger.Info("=== SCENARIO: Cancellation ===")
@@ -30,7 +31,6 @@ func ScenarioCancellation(ctx context.Context) error {
 	cfg := app.DefaultConfig()
 	cfg.MaxConcurrentDownloads = 2
 
-	// Many URLs to ensure we can cancel mid-flight
 	urls := make([]string, 20)
 	for i := 0; i < 20; i++ {
 		urls[i] = fmt.Sprintf("https://httpbin.org/delay/%d", (i%3)+1)
@@ -41,46 +41,49 @@ func ScenarioCancellation(ctx context.Context) error {
 		rawURLs[i] = pipeline.RawURL{ID: i, URL: u}
 	}
 
-	// Create a short-lived context
 	shortCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	logger.Info("running pipeline with short timeout", "urls", len(urls), "timeout_sec", 3)
-
-	normalized, err := pipeline.Run(shortCtx, logger, rawURLs)
+	normalized, err := pipeline.RunBuffered(shortCtx, logger, rawURLs, cfg.PipelineBufferSize)
 	if err != nil {
-		logger.Info("expected cancellation/timeout in pipeline", "error", err)
-	} else {
-		logger.Info("pipeline results", "count", len(normalized))
-
-		validURLs := make([]downloader.DownloadRequest, 0)
-		for _, nu := range normalized {
-			if nu.Valid {
-				validURLs = append(validURLs, downloader.DownloadRequest{ID: nu.ID, URL: nu.URL})
-			}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			logger.Info("pipeline canceled as expected", "error", err)
+			return nil
 		}
-
-		dl := downloader.New(cfg, logger)
-		dlCtx, dlCancel := context.WithTimeout(shortCtx, 2*time.Second)
-		defer dlCancel()
-
-		results, _ := dl.Run(dlCtx, validURLs)
-		logger.Info("download results despite timeout", "count", len(results))
+		return fmt.Errorf("run cancellation pipeline: %w", err)
 	}
 
-	return nil
+	validURLs := make([]downloader.DownloadRequest, 0, len(normalized))
+	for _, nu := range normalized {
+		if nu.Valid {
+			validURLs = append(validURLs, downloader.DownloadRequest{ID: nu.ID, URL: nu.URL})
+		}
+	}
+
+	dl := downloader.New(cfg, logger)
+	dlCtx, dlCancel := context.WithTimeout(shortCtx, 2*time.Second)
+	defer dlCancel()
+
+	results, err := dl.Run(dlCtx, validURLs)
+	logger.Info("download cancellation results", "count", len(results), "error", err)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("run cancellation downloader: %w", err)
+	}
+	return fmt.Errorf("expected downloader cancellation but run completed")
 }
 
-// ScenarioBackpressure tests that the downloader respects MaxConcurrentDownloads
+// ScenarioBackpressure demonstrates that MaxConcurrentDownloads bounds network work.
 func ScenarioBackpressure(ctx context.Context) error {
 	logger := logging.New()
 	logger.Info("=== SCENARIO: Backpressure (Rate Limiting) ===")
 
 	cfg := app.DefaultConfig()
-	cfg.MaxConcurrentDownloads = 2 // Very restrictive for demo
+	cfg.MaxConcurrentDownloads = 2
 	cfg.PerDownloadTimeout = 5 * time.Second
 
-	// URLs that have observable delays
 	urls := []string{
 		"https://httpbin.org/delay/1",
 		"https://httpbin.org/delay/1",
@@ -99,31 +102,27 @@ func ScenarioBackpressure(ctx context.Context) error {
 	defer cancel()
 
 	start := time.Now()
-	logger.Info("starting backpressure test", "max_concurrent", cfg.MaxConcurrentDownloads, "urls", len(urls))
-
 	results, err := dl.Run(runCtx, requests)
-
 	elapsed := time.Since(start)
-	logger.Info("backpressure test complete", "duration_sec", elapsed.Seconds(), "results", len(results), "error", err)
-
-	// With max 2 concurrent and 5 urls with 1 sec each, should take ~2.5 seconds minimum
-	if elapsed < 2*time.Second {
-		logger.Warn("completed too quickly, backpressure may not be enforced", "elapsed_sec", elapsed.Seconds())
+	logger.Info("backpressure scenario complete", "duration_sec", elapsed.Seconds(), "results", len(results), "error", err)
+	if err != nil {
+		return fmt.Errorf("run backpressure downloader: %w", err)
 	}
-
 	return nil
 }
 
-// ScenarioInvalidURLs tests handling of malformed URLs
+// ScenarioInvalidURLs tests handling of malformed URLs without network I/O.
 func ScenarioInvalidURLs(ctx context.Context) error {
 	logger := logging.New()
 	logger.Info("=== SCENARIO: Invalid URLs ===")
 
+	cfg := app.DefaultConfig()
 	badURLs := []string{
 		"not-a-url",
 		"",
 		"ftp://unsupported.example.com",
 		"ht!tp://weird.example.com",
+		"https:///missing-host",
 		"   ",
 	}
 
@@ -135,8 +134,10 @@ func ScenarioInvalidURLs(ctx context.Context) error {
 	pCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	logger.Info("normalizing invalid urls", "count", len(badURLs))
-	normalized, _ := pipeline.Run(pCtx, logger, rawURLs)
+	normalized, err := pipeline.RunBuffered(pCtx, logger, rawURLs, cfg.PipelineBufferSize)
+	if err != nil {
+		return fmt.Errorf("normalize invalid URL scenario: %w", err)
+	}
 
 	validCount := 0
 	invalidCount := 0
@@ -145,15 +146,18 @@ func ScenarioInvalidURLs(ctx context.Context) error {
 			validCount++
 		} else {
 			invalidCount++
-			logger.Info("invalid url details", "id", n.ID, "url", n.URL, "reasons", len(n.Reason))
+			logger.Info("invalid url details", "id", n.ID, "url", n.URL, "reasons", n.Reason)
 		}
 	}
 
-	logger.Info("invalid url test complete", "valid", validCount, "invalid", invalidCount)
+	logger.Info("invalid url scenario complete", "valid", validCount, "invalid", invalidCount)
+	if validCount != 0 || invalidCount != len(badURLs) {
+		return fmt.Errorf("unexpected validation counts: valid=%d invalid=%d", validCount, invalidCount)
+	}
 	return nil
 }
 
-// ScenarioMixed runs with a realistic mix of valid and invalid URLs
+// ScenarioMixed runs with a realistic mix of valid and invalid URLs.
 func ScenarioMixed(ctx context.Context) error {
 	logger := logging.New()
 	logger.Info("=== SCENARIO: Mixed Valid/Invalid ===")
@@ -179,10 +183,12 @@ func ScenarioMixed(ctx context.Context) error {
 	pCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	logger.Info("starting mixed scenario", "total_urls", len(urls))
-	normalized, _ := pipeline.Run(pCtx, logger, rawURLs)
+	normalized, err := pipeline.RunBuffered(pCtx, logger, rawURLs, cfg.PipelineBufferSize)
+	if err != nil {
+		return fmt.Errorf("run mixed pipeline: %w", err)
+	}
 
-	validURLs := make([]downloader.DownloadRequest, 0)
+	validURLs := make([]downloader.DownloadRequest, 0, len(normalized))
 	for _, n := range normalized {
 		if n.Valid {
 			validURLs = append(validURLs, downloader.DownloadRequest{ID: n.ID, URL: n.URL})
@@ -190,15 +196,18 @@ func ScenarioMixed(ctx context.Context) error {
 	}
 
 	logger.Info("after pipeline filtering", "valid_for_download", len(validURLs))
-
-	if len(validURLs) > 0 {
-		dl := downloader.New(cfg, logger)
-		dlCtx, dlCancel := context.WithTimeout(pCtx, 8*time.Second)
-		defer dlCancel()
-
-		results, _ := dl.Run(dlCtx, validURLs)
-		logger.Info("download results", "count", len(results))
+	if len(validURLs) == 0 {
+		return nil
 	}
 
+	dl := downloader.New(cfg, logger)
+	dlCtx, dlCancel := context.WithTimeout(pCtx, 8*time.Second)
+	defer dlCancel()
+
+	results, err := dl.Run(dlCtx, validURLs)
+	logger.Info("download results", "count", len(results), "error", err)
+	if err != nil {
+		return fmt.Errorf("run mixed downloader: %w", err)
+	}
 	return nil
 }

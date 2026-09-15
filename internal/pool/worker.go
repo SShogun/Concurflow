@@ -16,6 +16,9 @@ func (p *Pool) worker(ctx context.Context) {
 		case <-ctx.Done():
 			p.logger.Info("worker canceled")
 			return
+		case <-p.done:
+			p.logger.Info("worker pool shut down")
+			return
 		case job, ok := <-p.jobs:
 			if !ok {
 				p.logger.Info("job channel closed")
@@ -28,6 +31,9 @@ func (p *Pool) worker(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				p.logger.Info("result dropped due to cancel")
+				return
+			case <-p.done:
+				p.logger.Info("result dropped due to shutdown")
 				return
 			case p.results <- result:
 				p.logger.Info("job processed")

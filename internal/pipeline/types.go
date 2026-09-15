@@ -8,10 +8,12 @@ type RawURL struct {
 type Reason string
 
 const (
-	fair               Reason = "fair"
-	empty              Reason = "empty"
-	missing_scheme     Reason = "missing_scheme"
-	unsupported_scheme Reason = "unsupported_scheme"
+	fair              Reason = "fair"
+	empty             Reason = "empty"
+	malformedURL      Reason = "malformed_url"
+	missingScheme     Reason = "missing_scheme"
+	missingHost       Reason = "missing_host"
+	unsupportedScheme Reason = "unsupported_scheme"
 )
 
 type NormalizedURL struct {

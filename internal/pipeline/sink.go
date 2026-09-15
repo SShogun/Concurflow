@@ -10,11 +10,15 @@ func Sink(ctx context.Context, in <-chan NormalizedURL, logger *slog.Logger) ([]
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("sink canceled")
+			if logger != nil {
+				logger.Info("sink canceled")
+			}
 			return nil, ctx.Err()
 		case url, ok := <-in:
 			if !ok {
-				logger.Info("sink completed", "count", len(result))
+				if logger != nil {
+					logger.Info("sink completed", "count", len(result))
+				}
 				return result, nil
 			}
 			result = append(result, url)

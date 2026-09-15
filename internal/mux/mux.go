@@ -8,53 +8,51 @@ import (
 
 type Event struct {
 	EventType string
-	Data      interface{}
+	Data      any
 }
 
 // Merge combines multiple event channels into a single output channel.
-// Returns a channel that receives events from all inputs until context is done or all inputs close.
+// The output closes only after every input is exhausted or cancellation stops all forwarders.
 func Merge(ctx context.Context, logger *slog.Logger, inputs ...<-chan Event) <-chan Event {
 	out := make(chan Event, 5)
 
-	go func() {
-		defer close(out)
+	if len(inputs) == 0 {
+		close(out)
+		return out
+	}
 
-		if len(inputs) == 0 {
-			return
-		}
+	var wg sync.WaitGroup
+	wg.Add(len(inputs))
 
-		var wg sync.WaitGroup
+	for _, ch := range inputs {
+		go func(in <-chan Event) {
+			defer wg.Done()
 
-		// Each input channel gets its own forwarder goroutine
-		for _, ch := range inputs {
-			wg.Add(1)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case evt, ok := <-in:
+					if !ok {
+						return
+					}
 
-			go func(in <-chan Event) {
-				defer wg.Done()
-
-				for {
 					select {
+					case out <- evt:
 					case <-ctx.Done():
 						return
-					case evt, ok := <-in:
-						if !ok {
-							return
-						}
-						select {
-						case out <- evt:
-						case <-ctx.Done():
-							return
-						}
 					}
 				}
-			}(ch)
-		}
+			}
+		}(ch)
+	}
 
-		// Close output once all forwarders finish
-		go func() {
-			wg.Wait()
+	go func() {
+		wg.Wait()
+		if logger != nil {
 			logger.Debug("all mux inputs exhausted", "component", "mux")
-		}()
+		}
+		close(out)
 	}()
 
 	return out

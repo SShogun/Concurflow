@@ -10,17 +10,14 @@ The repository focuses on ownership and lifecycle rules that matter in concurren
 
 ![ConcurFlow architecture diagram](mermaid-diagram.png)
 
-## What It Demonstrates
+## Design Trade-Offs & Concurrency Model
 
-- source -> transform -> sink channel pipelines;
-- configurable pipeline buffering;
-- semaphore-backed download concurrency limits;
-- parent cancellation plus per-download timeouts;
-- deterministic result ordering despite concurrent execution;
-- fan-in with correct output-channel ownership;
-- worker-pool shutdown that is safe against concurrent submissions;
-- structured logging and explicit validation failures;
-- deterministic concurrency tests using `httptest` and synchronization channels.
+Unbounded goroutine spawning (`go fetch(url)` per input) quickly exhausts OS file descriptors, triggers ephemeral port starvation, and causes high memory fragmentation under bursty inputs. Concurflow enforces explicit backpressure and deterministic teardown across three stages:
+
+- **Stage-Gated Filtering Before I/O:** Malformed, duplicate, or unsupported URLs are rejected synchronously before entering the worker channel, preventing wasted network sockets and TLS handshakes.
+- **Bounded Worker Pool (`semaphore` / buffered channel topology):** Caps active in-flight HTTP connections to a fixed worker count ($N$), trading unbounded concurrency for predictable memory ceilings and socket reuse via `http.Transport` connection pooling.
+- **Context-Driven Cancellation & Teardown:** Propagates `context.Context` timeouts down to individual `http.Request` lifecycles while coordinating `sync.WaitGroup` barriers, guaranteeing zero leaked goroutines on early abort or upstream failure.
+- **Fan-In Result Multiplexing:** Decouples network download throughput from disk/output I/O by funneling worker results through a dedicated aggregator channel, eliminating shared-state mutex contention across workers.
 
 ## Main Flow
 

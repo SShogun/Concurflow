@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -171,5 +172,34 @@ func TestRunRejectsInvalidConcurrency(t *testing.T) {
 
 	if _, err := dl.Run(context.Background(), []DownloadRequest{{ID: 1, URL: "https://example.com"}}); err == nil {
 		t.Fatal("expected invalid concurrency configuration to fail")
+	}
+}
+
+type countingTransport struct{ calls atomic.Int32 }
+
+func (c *countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	c.calls.Add(1)
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header)}, nil
+}
+func TestRunCanceledBeforeStartDoesNotInvokeTransport(t *testing.T) {
+	cfg := config.Default()
+	dl := New(cfg, testLogger())
+	transport := &countingTransport{}
+	dl.client = &http.Client{Transport: transport}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	requests := make([]DownloadRequest, 64)
+	for i := range requests {
+		requests[i] = DownloadRequest{ID: i, URL: "http://example.test"}
+	}
+	results, err := dl.Run(ctx, requests)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want canceled", err)
+	}
+	if len(results) != len(requests) {
+		t.Fatalf("got %d results", len(results))
+	}
+	if calls := transport.calls.Load(); calls != 0 {
+		t.Fatalf("canceled requests reached transport %d times", calls)
 	}
 }

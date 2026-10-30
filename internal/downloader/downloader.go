@@ -73,6 +73,14 @@ func (d *Downloader) Run(ctx context.Context, reqs []DownloadRequest) ([]Downloa
 			case semaphore <- struct{}{}:
 			}
 
+			// Cancellation and an available permit may both be ready in the select.
+			// Do not start HTTP work when cancellation already won that race.
+			if err := ctx.Err(); err != nil {
+				<-semaphore
+				internalResults <- indexedResult{index: idx, result: DownloadResult{ID: request.ID, URL: request.URL, Err: err}}
+				return
+			}
+
 			// A goroutine may release a semaphore slot only after it has acquired one.
 			defer func() {
 				<-semaphore

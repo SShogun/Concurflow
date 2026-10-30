@@ -24,6 +24,18 @@ func New(cfg Config) *App {
 
 // Run orchestrates URL normalization and bounded concurrent downloads.
 func (a *App) Run(ctx context.Context) error {
+	// Sample URLs for demo - in real usage these would come from user input or API.
+	return a.run(ctx, []string{
+		"https://www.google.com",
+		"https://github.com",
+		"https://www.wikipedia.org",
+		"https://stackoverflow.com",
+		"not-a-url",
+		"",
+	})
+}
+
+func (a *App) run(ctx context.Context, urls []string) error {
 	if err := a.cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
@@ -32,16 +44,6 @@ func (a *App) Run(ctx context.Context) error {
 	defer cancel()
 
 	a.logger.Info("app starting", "config", fmt.Sprintf("%+v", a.cfg))
-
-	// Sample URLs for demo - in real usage these would come from user input or API.
-	urls := []string{
-		"https://www.google.com",
-		"https://github.com",
-		"https://www.wikipedia.org",
-		"https://stackoverflow.com",
-		"not-a-url",
-		"",
-	}
 
 	a.logger.Info("phase 1: normalizing urls", "component", "app")
 	rawURLs := make([]pipeline.RawURL, len(urls))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -73,12 +74,20 @@ func normalize(raw RawURL, logger *slog.Logger) NormalizedURL {
 		}
 		return result
 	}
-	if u.Host == "" {
+	if u.Hostname() == "" {
 		result.Reason = []Reason{missingHost}
 		if logger != nil {
 			logger.Info("missing host", "id", raw.ID, "url", trimmed)
 		}
 		return result
+	}
+
+	if port := u.Port(); port != "" {
+		value, err := strconv.Atoi(port)
+		if err != nil || value < 1 || value > 65535 {
+			result.Reason = []Reason{malformedURL}
+			return result
+		}
 	}
 
 	result.Valid = true
